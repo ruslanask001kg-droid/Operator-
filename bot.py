@@ -22,7 +22,7 @@ import urllib.request
 import urllib.error
 
 TOKEN = os.environ["BOT_TOKEN"]
-OPERATOR_CHAT_ID = int(os.environ["OPERATOR_CHAT_ID"])
+OPERATOR_CHAT_ID = int(os.environ["-1004313280509"])
 API = f"https://api.telegram.org/bot{TOKEN}/"
 MAP_FILE = "reply_map.json"  # message_id у оператора -> chat_id клиента
 
