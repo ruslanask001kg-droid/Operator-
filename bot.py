@@ -1,32 +1,26 @@
+
 #!/usr/bin/env python3
-"""BigPay help — Telegram support bot (только стандартная библиотека Python 3.8+).
+"""BigPay help — Telegram support bot (pyTelegramBotAPI + Flask).
 
-Запуск:
-    export BOT_TOKEN="токен от @BotFather для @Bighp_bot"
-    export OPERATOR_CHAT_ID="ваш Telegram ID или ID группы операторов"
-    python3 bigpay_help_bot.py
-
-Как это работает:
-  * /start -> приветствие + 4 кнопки.
-  * Кнопки показывают инструкции (тексты ниже можно менять).
-  * Любое сообщение клиента (текст, фото, чек) пересылается оператору.
-  * Оператор отвечает через «Ответить» (reply) на пересланное сообщение —
-    бот отправляет ответ клиенту.
+Переменные окружения: BOT_TOKEN, PORT (задаёт Render).
+Оператор отвечает клиенту реплаем на пересланное сообщение.
 """
 import json
 import os
 import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import urllib.request
-import urllib.error
+
+import telebot
+from telebot import types
+from flask import Flask
 
 TOKEN = os.environ["BOT_TOKEN"]
-OPERATOR_CHAT_ID = int(os.environ["-1004313280509"])
-API = f"https://api.telegram.org/bot{TOKEN}/"
+OPERATOR_CHAT_ID = -1004313280509  # Установлен ID группы операторов
 MAP_FILE = "reply_map.json"  # message_id у оператора -> chat_id клиента
 
-# ---------- Тексты (редактируйте под себя) ----------
+bot = telebot.TeleBot(TOKEN, parse_mode=None)
+app = Flask(__name__)
+
+# ---------- Тексты ----------
 GREETING = (
     "Здравствуйте!\n"
     "Вас приветствует оператор.\n"
@@ -62,37 +56,19 @@ BTN_PAY = "💳 Проблема с оплатой"
 BTN_WD = "💸 Проблема с выводом"
 BTN_ADDR = "📍 Адрес вывода"
 BTN_OP = "👤 Позвать оператора"
-
-# Статичная (постоянная) клавиатура внизу экрана
-KEYBOARD = {
-    "keyboard": [
-        [{"text": BTN_PAY}, {"text": BTN_WD}],
-        [{"text": BTN_ADDR}],
-        [{"text": BTN_OP}],
-    ],
-    "resize_keyboard": True,
-    "is_persistent": True,
-}
 BUTTON_ANSWERS = {BTN_PAY: TEXT_PAYMENT, BTN_WD: TEXT_WITHDRAW,
                   BTN_ADDR: TEXT_ADDRESS, BTN_OP: TEXT_CALL}
 
 
-def call(method, **params):
-    data = json.dumps(params).encode()
-    req = urllib.request.Request(
-        API + method, data=data, headers={"Content-Type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=70) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        print("HTTP error", method, e.read().decode(errors="ignore"))
-    except Exception as e:  # сеть и т.п.
-        print("Error", method, e)
-        time.sleep(3)
-    return {"ok": False}
+def keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True)
+    kb.row(types.KeyboardButton(BTN_PAY), types.KeyboardButton(BTN_WD))
+    kb.row(types.KeyboardButton(BTN_ADDR))
+    kb.row(types.KeyboardButton(BTN_OP))
+    return kb
 
 
+# ---------- Связь оператор <-> клиент ----------
 def load_map():
     try:
         with open(MAP_FILE) as f:
@@ -112,92 +88,60 @@ def save_map():
         print("save_map error", e)
 
 
-def send_menu(chat_id):
-    call("sendMessage", chat_id=chat_id, text=GREETING, reply_markup=KEYBOARD)
+# ---------- Обработчики ----------
+@bot.message_handler(commands=["start"])
+def on_start(m):
+    bot.send_message(m.chat.id, GREETING, reply_markup=keyboard())
 
 
-def handle_message(m):
-    chat_id = m["chat"]["id"]
-    text = m.get("text", "")
-
-    # Сообщение от оператора (reply на пересланное сообщение клиента)
-    if chat_id == OPERATOR_CHAT_ID:
-        target = reply_map.get(m.get("reply_to_message", {}).get("message_id"))
-        if target:
-            call("copyMessage", chat_id=target, from_chat_id=chat_id,
-                 message_id=m["message_id"])
+# Сообщения оператора (реплай на пересланное сообщение клиента)
+@bot.message_handler(func=lambda m: m.chat.id == OPERATOR_CHAT_ID,
+                     content_types=["text", "photo", "document", "video", "voice"])
+def from_operator(m):
+    if m.reply_to_message is None:
         return
-
-    if text.startswith("/start"):
-        send_menu(chat_id)
-        return
-
-    # Нажатие статичной кнопки
-    if text in BUTTON_ANSWERS:
-        call("sendMessage", chat_id=chat_id, text=BUTTON_ANSWERS[text],
-             reply_markup=KEYBOARD)
-        if text == BTN_OP:
-            u = m.get("from", {})
-            call("sendMessage", chat_id=OPERATOR_CHAT_ID,
-                 text=f"🔔 Клиент зовёт оператора: {u.get('first_name', '')} "
-                      f"@{u.get('username', '-')} (id {u.get('id')})")
-        return
-
-    # Сообщение клиента -> оператору
-    fwd = call("forwardMessage", chat_id=OPERATOR_CHAT_ID, from_chat_id=chat_id,
-               message_id=m["message_id"])
-    if fwd.get("ok"):
-        reply_map[fwd["result"]["message_id"]] = chat_id
-        u = m.get("from", {})
-        info = call("sendMessage", chat_id=OPERATOR_CHAT_ID,
-                    text=f"От: {u.get('first_name', '')} @{u.get('username', '-')} "
-                         f"(id {u.get('id')})\nОтветьте реплаем на это или пересланное сообщение.",
-                    reply_to_message_id=fwd["result"]["message_id"])
-        if info.get("ok"):
-            reply_map[info["result"]["message_id"]] = chat_id
-        save_map()
-        call("sendMessage", chat_id=chat_id,
-             text="Принято ✅ Оператор ответит в течение 24 часов.",
-             reply_markup=KEYBOARD)
+    target = reply_map.get(m.reply_to_message.message_id)
+    if target:
+        bot.copy_message(target, m.chat.id, m.message_id)
 
 
-class Health(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"ok")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, *a):
-        pass
+@bot.message_handler(func=lambda m: m.text in BUTTON_ANSWERS)
+def on_button(m):
+    bot.send_message(m.chat.id, BUTTON_ANSWERS[m.text], reply_markup=keyboard())
+    if m.text == BTN_OP:
+        u = m.from_user
+        bot.send_message(OPERATOR_CHAT_ID,
+                         f"🔔 Клиент зовёт оператора: {u.first_name} "
+                         f"@{u.username or '-'} (id {u.id})")
 
 
-def start_health_server():
-    """Render Web Service требует открытый порт ($PORT)."""
-    port = os.environ.get("PORT")
-    if port:
-        srv = HTTPServer(("0.0.0.0", int(port)), Health)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+@bot.message_handler(content_types=["text", "photo", "document", "video", "voice"])
+def from_client(m):
+    fwd = bot.forward_message(OPERATOR_CHAT_ID, m.chat.id, m.message_id)
+    reply_map[fwd.message_id] = m.chat.id
+    u = m.from_user
+    info = bot.send_message(
+        OPERATOR_CHAT_ID,
+        f"От: {u.first_name} @{u.username or '-'} (id {u.id})\n"
+        "Ответьте реплаем на это или пересланное сообщение.",
+        reply_to_message_id=fwd.message_id)
+    reply_map[info.message_id] = m.chat.id
+    save_map()
+    bot.send_message(m.chat.id, "Принято ✅ Оператор ответит в течение 24 часов.",
+                     reply_markup=keyboard())
 
 
-def main():
-    start_health_server()
-    print("Bot started")
-    offset = 0
-    while True:
-        res = call("getUpdates", offset=offset, timeout=50,
-                   allowed_updates=["message"])
-        for upd in res.get("result", []):
-            offset = upd["update_id"] + 1
-            try:
-                if "message" in upd:
-                    handle_message(upd["message"])
-            except Exception as e:
-                print("handler error", e)
+# ---------- Flask (для Render) ----------
+@app.route("/")
+def index():
+    return "ok"
+
+
+def run_bot():
+    bot.infinity_polling(skip_pending=True)
 
 
 if __name__ == "__main__":
-    main()
+    bot.remove_webhook()
+    threading.Thread(target=run_bot, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
